@@ -94,7 +94,7 @@ def train_on_tpu(index, config):
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
-        num_replicas=xm.xla_device_hw(device).num_devices,
+        num_replicas=8,
         rank=xm.get_ordinal(),
         shuffle=True
     )
