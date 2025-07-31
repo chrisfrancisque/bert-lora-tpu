@@ -230,7 +230,7 @@ def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     if config.use_tpu:
-        xmp.spawn(train_on_tpu, args=(config,), nprocs=config.tpu_num_cores)
+        xmp.spawn(train_on_tpu, args=(config,))
     else:
         train_on_tpu(0, config)
 if __name__ =="__main__":
