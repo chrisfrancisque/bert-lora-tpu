@@ -71,7 +71,7 @@ def track_gradients(model, step, writer_dict):
 def train_on_tpu(index, config):
     #device setup
     device = xm.xla_device()
-    xm.set_replication(device, [device])
+    
 
     is_master = xm.is_master_ordinal()
 
