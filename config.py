@@ -7,8 +7,8 @@ class LoRAConfig:
 
     #Core Lora parameters
     r: int = 8
-    lora_alpha: int = 16
-    lora_dropout: float = 0.1
+    lora_alpha: int = 8
+    lora_dropout: float = 0.05
 
     
     #Which layers to apply LoRA to
@@ -35,12 +35,12 @@ class TrainingConfig:
     max_seq_length: int = 128
     train_samples: int = 0
 
-    per_device_train_batch_size: int = 128
-    per_device_eval_batch_size: int = 16
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 8
 
-    learning_rate: float = 5e-4
+    learning_rate: float = 1e-4
     num_train_epochs: int = 3
-    warmup_steps: int = 500
+    warmup_steps: int = 100
     weight_decay: float = 0.01
 
     # TPU settings

@@ -6,8 +6,8 @@ os.environ["TORCH_LOGS"] = "-dynamo"
 os.environ["XLA_USE_TORCH_COMPILE"] = "false"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-
 import torch
+torch._dynamo.config.disable = True
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
 import torch_xla.distributed.parallel_loader as pl
@@ -16,6 +16,8 @@ import logging
 from datetime import datetime
 import json
 from tqdm import tqdm
+import torch._dynamo.config as dynamo_config
+import torch.nn.functional as F
 
 from config import TrainingConfig
 from dataset_utils import load_and_prepare_dataset
@@ -155,11 +157,25 @@ def train_on_tpu(index, config):
             #Forward Pass with autocast for bfloat16
             with torch.autocast('xla', dtype=torch.bfloat16):
                 outputs = model(**batch)
-                loss = outputs.loss
+                logits = outputs.logits
+            
+            #Compute loss in float32 for numerical stability
+            with torch.autocast('xla', enabled=False):
+                logits_fp32 = logits.float()
+                labels = batch['labels']
+                loss = F.cross_entropy(logits_fp32, labels)
+            
+            if torch.isnan(loss):
+                logger.warning(f"NaN loss detected at step {global_step}, skipping batch")
+                optimizer.zero_grad()
+                continue
 
             #backward pass
             loss.backward()
             logger.info("gradient tracking starting")
+
+            #Gradient Clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
 
             if config.track_gradients and global_step % config.gradient_tracking_steps == 0:
