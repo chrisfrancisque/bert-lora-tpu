@@ -186,6 +186,7 @@ def train_on_tpu(index, config):
             
             xm.optimizer_step(optimizer)
             optimizer.zero_grad()
+            xm.mark_step()
 
             #Update learning rate
             if global_step < num_warmup_steps:
@@ -215,6 +216,10 @@ def train_on_tpu(index, config):
             #Evaluate at end of epoch
             logger.info("Running evaluation")
             eval_metrics = evaluate_model(model, eval_dataset, config, device)
+            xm.mark_step()
+
+            xm.rendezvous(f"eval_epoch_{epoch}_complete")
+
 
             metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in eval_metrics.items() 
                                    if k != 'roc_curve'])
