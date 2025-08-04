@@ -1,4 +1,12 @@
 import os
+
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+os.environ["TORCHINDUCTOR_DISABLE"] = "1"
+os.environ["TORCH_LOGS"] = "-dynamo"
+os.environ["XLA_USE_TORCH_COMPILE"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
 import torch
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
@@ -71,11 +79,12 @@ def track_gradients(model, step, writer_dict):
 def train_on_tpu(index, config):
     #device setup
     device = xm.xla_device()
-    xm.set_replication(device, [device])
     logger.info("Device set")
     
 
-    is_master = xm.is_master_ordinal()
+    is_master = index == 0
+
+
 
     if is_master:
         logger.info(f"Starting training on TPU core {index}")
@@ -101,8 +110,8 @@ def train_on_tpu(index, config):
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
-        num_replicas=xm.xrt_world_size(),
-        rank=xm.get_ordinal(),
+        num_replicas=8,
+        rank=index,
         shuffle=True
     )
 
@@ -241,10 +250,9 @@ def train_on_tpu(index, config):
 def main():
     config = TrainingConfig()
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
     if config.use_tpu:
-        xmp.spawn(train_on_tpu, args=(config,), nprocs=config.tpu_num_cores)
+   
+        xmp.spawn(train_on_tpu, args=(config,))
     else:
         train_on_tpu(0, config)
 if __name__ =="__main__":
