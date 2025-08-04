@@ -18,6 +18,7 @@ import json
 from tqdm import tqdm
 import torch._dynamo.config as dynamo_config
 import torch.nn.functional as F
+import math
 
 from config import TrainingConfig
 from dataset_utils import load_and_prepare_dataset
@@ -32,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 def setup_directories(config):
     """Create output directories"""
-
     os.makedirs(config.output_dir, exist_ok=True)
     os.makedirs(config.logging_dir, exist_ok=True)
     os.makedirs(f"{config.output_dir}/gradients", exist_ok=True)
@@ -40,7 +40,7 @@ def setup_directories(config):
 
 
 def track_gradients(model, step, writer_dict):
-    gradient_data ={
+    gradient_data = {
         'step': step,
         'lora_gradients': {},
         'base_gradients': {},
@@ -61,55 +61,47 @@ def track_gradients(model, step, writer_dict):
                 base_grads.append(grad_norm)
                 gradient_data['base_gradients'][name] = grad_norm
     
-    #Calculate Statistics
+    # Calculate Statistics
     if lora_grads:
-        gradient_data['statistics']['lora_mean'] = sum(lora_grads)/len(lora_grads)
+        gradient_data['statistics']['lora_mean'] = sum(lora_grads) / len(lora_grads)
         gradient_data['statistics']['lora_max'] = max(lora_grads)
         gradient_data['statistics']['lora_min'] = min(lora_grads)
 
     if base_grads:
-        gradient_data['statistics']['base_mean'] = sum(base_grads)/ len(base_grads)
+        gradient_data['statistics']['base_mean'] = sum(base_grads) / len(base_grads)
         gradient_data['statistics']['base_max'] = max(base_grads)
 
-    
     filename = f"{writer_dict['gradient_dir']}/gradient_step_{step}.json"
     with open(filename, 'w') as f:
-        json.dump(gradient_data, f, indent =2)
+        json.dump(gradient_data, f, indent=2)
 
     return gradient_data['statistics']
 
+
 def train_on_tpu(index, config):
-    #device setup
+    # Device setup
     device = xm.xla_device()
-    logger.info("Device set")
-    
-
     is_master = index == 0
-
-
 
     if is_master:
         logger.info(f"Starting training on TPU core {index}")
         setup_directories(config)
 
-    #Load data on ALL processes not just master
+    # Load data on ALL processes not just master
     train_dataset, eval_dataset, tokenizer = load_and_prepare_dataset(config)
-    logger.info("Datasets Loaded")
-
+    
+    # Create model
     model = create_lora_model(config)
     model = model.to(device)
-    logger.info("Model created")
-
-
+    
+    # Create optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr = config.learning_rate,
-        weight_decay = config.weight_decay
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay
     )
-    logger.info("Optimizer set")
 
-
-
+    # Create distributed sampler and dataloader
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
         num_replicas=8,
@@ -127,11 +119,10 @@ def train_on_tpu(index, config):
     train_device_loader = pl.MpDeviceLoader(train_dataloader, device)
 
     writer_dict = {
-        'gradient_dir' : f"{config.output_dir}/gradients"
+        'gradient_dir': f"{config.output_dir}/gradients"
     }
 
     metrics_history = []
-
     num_training_steps = len(train_dataloader) * config.num_train_epochs
     num_warmup_steps = config.warmup_steps
 
@@ -139,7 +130,6 @@ def train_on_tpu(index, config):
         logger.info(f"Total training steps: {num_training_steps}")
         logger.info(f"Warmup steps: {num_warmup_steps}")
 
-    logger.info("starting training loop")
     # Training Loop
     global_step = 0
 
@@ -151,15 +141,12 @@ def train_on_tpu(index, config):
             pbar = tqdm(total=len(train_dataloader), desc=f"Epoch {epoch}")
 
         for step, batch in enumerate(train_device_loader):
-            
-            
-            logger.info("Forward Pass starting")
-            #Forward Pass with autocast for bfloat16
+            # Forward Pass with autocast for bfloat16
             with torch.autocast('xla', dtype=torch.bfloat16):
                 outputs = model(**batch)
                 logits = outputs.logits
             
-            #Compute loss in float32 for numerical stability
+            # Compute loss in float32 for numerical stability
             with torch.autocast('xla', enabled=False):
                 logits_fp32 = logits.float()
                 labels = batch['labels']
@@ -170,120 +157,117 @@ def train_on_tpu(index, config):
                 optimizer.zero_grad()
                 continue
 
-            #backward pass
+            # Backward pass
             loss.backward()
-            logger.info("gradient tracking starting")
 
-            #Gradient Clipping
+            # Gradient Clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-
+            # Track gradients if needed
             if config.track_gradients and global_step % config.gradient_tracking_steps == 0:
                 if is_master:
                     grad_stats = track_gradients(model, global_step, writer_dict)
                     logger.info(f"Step {global_step} gradient stats: {grad_stats}")
 
-            
+            # Optimizer step
             xm.optimizer_step(optimizer)
             optimizer.zero_grad()
             xm.mark_step()
 
-            #Update learning rate
+            # Update learning rate with cosine schedule
             if global_step < num_warmup_steps:
                 lr = config.learning_rate * global_step / num_warmup_steps
             else:
                 progress = (global_step - num_warmup_steps) / (num_training_steps - num_warmup_steps)
-                lr = config.learning_rate * 0.5 * (1+ torch.cos(torch.tensor(3.14159 * progress)))
+                lr = config.learning_rate * 0.5 * (1 + math.cos(math.pi * progress))
 
             for param_group in optimizer.param_groups:
-                param_group['lr'] = lr.item() if hasattr(lr, 'item') else lr
+                param_group['lr'] = lr
 
-            
             epoch_loss += loss.item()
             global_step += 1
 
-            if is_master and step%10 == 0:
+            if is_master and step % 10 == 0:
                 pbar.update(10)
                 pbar.set_postfix({'loss': loss.item(), 'lr': lr})
 
-            logger.info("Parameters updated")
-            
+        # End of epoch
         if is_master:
             pbar.close()
             avg_loss = epoch_loss / len(train_dataloader)
             logger.info(f"Epoch {epoch} average loss: {avg_loss:.4f}")
 
-            #Evaluate at end of epoch
-            logger.info("Running evaluation")
-            eval_metrics = evaluate_model(model, eval_dataset, config, device)
-            xm.mark_step()
+        # IMPORTANT: ALL processes must participate in evaluation
+        logger.info("Running evaluation")
+        eval_metrics = evaluate_model(model, eval_dataset, config, device)
+        xm.mark_step()
+        
+        # IMPORTANT: ALL processes must reach this synchronization point
+        xm.rendezvous(f"eval_epoch_{epoch}_complete")
 
-            xm.rendezvous(f"eval_epoch_{epoch}_complete")
-
-
+        # Only master handles metrics logging and saving
+        if is_master:
             metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in eval_metrics.items() 
                                    if k != 'roc_curve'])
-            
             logger.info(f"Epoch {epoch} eval metrics: {metrics_str}")
-
+            
             metrics_history.append(eval_metrics)
-
             save_metrics(eval_metrics, f"{config.output_dir}/metrics_epoch_{epoch}.json")
 
-            if epoch == config.num_train_epochs - 1:
-                logger.info("Generating Visualizations...")
-                visualize_metrics(metrics_history, f"{config.output_dir}/plots")
+        # Save checkpoint after EVERY epoch (not just the last one)
+        if is_master:
+            checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch}"
+            os.makedirs(checkpoint_path, exist_ok=True)
+            
+            # Save LoRA weights only
+            lora_state_dict = get_lora_state_dict(model)
+            xm.save(lora_state_dict, f"{checkpoint_path}/adapter_model.bin")
+            
+            # Save configuration
+            model.save_pretrained(checkpoint_path)
+            tokenizer.save_pretrained(checkpoint_path)
+            
+            logger.info(f"Checkpoint saved to {checkpoint_path}")
 
-                save_metrics(eval_metrics, f"{config.output_dir}/final_metrics.json")
+        # IMPORTANT: ALL processes must synchronize after checkpoint save
+        xm.rendezvous(f"checkpoint_epoch_{epoch}_saved")
+        xm.mark_step()
 
-                summary = {
-                    'config': {
-                        'model':config.model_name,
-                        'lora_rank': config.lora_config.r,
-                        'lora_alpha': config.lora_config.lora_alpha,
-                        'learning_rate': config.learning_rate,
-                        'batch_size': config.total_train_batch_size,
-                        'epochs': config.num_train_epochs
-                    },
-                    'final_metrics': {k: v for k,v in eval_metrics.items() if k != 'roc_curve'},
-                    'metrics_history': [{k: v for k,v in m.items() if k != 'roc_curve'} for m in metrics_history]
-                }
+        # Generate final visualizations and summary only on last epoch
+        if is_master and epoch == config.num_train_epochs - 1:
+            logger.info("Generating final visualizations...")
+            visualize_metrics(metrics_history, f"{config.output_dir}/plots")
+            save_metrics(eval_metrics, f"{config.output_dir}/final_metrics.json")
 
-                with open(f"{config.output_dir}/training_summary.json", 'w') as f:
-                    json.dump(summary, f, indent =2)
+            summary = {
+                'config': {
+                    'model': config.model_name,
+                    'lora_rank': config.lora_config.r,
+                    'lora_alpha': config.lora_config.lora_alpha,
+                    'learning_rate': config.learning_rate,
+                    'batch_size': config.total_train_batch_size,
+                    'epochs': config.num_train_epochs
+                },
+                'final_metrics': {k: v for k, v in eval_metrics.items() if k != 'roc_curve'},
+                'metrics_history': [{k: v for k, v in m.items() if k != 'roc_curve'} 
+                                  for m in metrics_history]
+            }
 
-
-                if is_master:
-                    #Save checkpoint
-                    checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch}"
-                    os.makedirs(checkpoint_path, exist_ok=True)
-
-                    #Save LoRA weights only
-                    lora_state_dict = get_lora_state_dict(model)
-                    xm.save(lora_state_dict, f"{checkpoint_path}/adapter_model.bin")
-
-                    #Save configuration
-                    model.save_pretrained(checkpoint_path)
-                    tokenizer.save_pretrained(checkpoint_path)
-                xm.rendezvous("checkpoint_save")
-                xm.mark_step()
+            with open(f"{config.output_dir}/training_summary.json", 'w') as f:
+                json.dump(summary, f, indent=2)
 
     if is_master:
-        logger.info("Training Completed")
+        logger.info("Training completed successfully!")
+
 
 def main():
     config = TrainingConfig()
 
     if config.use_tpu:
-   
         xmp.spawn(train_on_tpu, args=(config,))
     else:
         train_on_tpu(0, config)
-if __name__ =="__main__":
+
+
+if __name__ == "__main__":
     main()
-
-
-
-
-
-
