@@ -262,12 +262,14 @@ def train_on_tpu(index, config):
 
 def main():
     config = TrainingConfig()
-
-    if config.use_tpu:
-        xmp.spawn(train_on_tpu, args=(config,))
-    else:
-        train_on_tpu(0, config)
-
+    
+    # When using xla_dist, it will handle the spawning
+    # Get the local rank from environment
+    import os
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    
+    # Run directly without xmp.spawn
+    train_on_tpu(local_rank, config)
 
 if __name__ == "__main__":
     main()
