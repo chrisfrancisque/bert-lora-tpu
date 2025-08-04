@@ -33,7 +33,7 @@ class TrainingConfig:
     num_labels: int = 2
     dataset_name: str = 'sst2'
     max_seq_length: int = 128
-    train_samples: int = 0
+    train_samples: int = 10000
 
     per_device_train_batch_size: int = 8
     per_device_eval_batch_size: int = 8
