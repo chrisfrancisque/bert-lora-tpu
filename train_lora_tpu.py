@@ -72,6 +72,8 @@ def train_on_tpu(index, config):
     #device setup
     device = xm.xla_device()
     xm.set_replication(device, [device])
+    logger.info("Device set")
+    
 
     is_master = xm.is_master_ordinal()
 
@@ -81,15 +83,20 @@ def train_on_tpu(index, config):
 
     #Load data on ALL processes not just master
     train_dataset, eval_dataset, tokenizer = load_and_prepare_dataset(config)
+    logger.info("Datasets Loaded")
 
     model = create_lora_model(config)
     model = model.to(device)
+    logger.info("Model created")
+
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr = config.learning_rate,
         weight_decay = config.weight_decay
     )
+    logger.info("Optimizer set")
+
 
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -121,7 +128,7 @@ def train_on_tpu(index, config):
         logger.info(f"Total training steps: {num_training_steps}")
         logger.info(f"Warmup steps: {num_warmup_steps}")
 
-    
+    logger.info("starting training loop")
     # Training Loop
     global_step = 0
 
@@ -134,6 +141,8 @@ def train_on_tpu(index, config):
 
         for step, batch in enumerate(train_device_loader):
             
+            
+            logger.info("Forward Pass starting")
             #Forward Pass with autocast for bfloat16
             with torch.autocast('xla', dtype=torch.bfloat16):
                 outputs = model(**batch)
@@ -141,6 +150,8 @@ def train_on_tpu(index, config):
 
             #backward pass
             loss.backward()
+            logger.info("gradient tracking starting")
+
 
             if config.track_gradients and global_step % config.gradient_tracking_steps == 0:
                 if is_master:
@@ -161,6 +172,7 @@ def train_on_tpu(index, config):
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr.item() if hasattr(lr, 'item') else lr
 
+            
             epoch_loss += loss.item()
             global_step += 1
 
@@ -168,6 +180,8 @@ def train_on_tpu(index, config):
                 pbar.update(10)
                 pbar.set_postfix({'loss': loss.item(), 'lr': lr})
 
+            logger.info("Parameters updated")
+            
         if is_master:
             pbar.close()
             avg_loss = epoch_loss / len(train_dataloader)
