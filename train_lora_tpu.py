@@ -248,17 +248,19 @@ def train_on_tpu(index, config):
                     json.dump(summary, f, indent =2)
 
 
-            #Save checkpoint
-            checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch}"
-            os.makedirs(checkpoint_path, exist_ok=True)
+            if is_master:
+                #Save checkpoint
+                checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch}"
+                os.makedirs(checkpoint_path, exist_ok=True)
 
-            #Save LoRA weights only
-            lora_state_dict = get_lora_state_dict(model)
-            xm.save(lora_state_dict, f"{checkpoint_path}/adapter_model.bin")
+                #Save LoRA weights only
+                lora_state_dict = get_lora_state_dict(model)
+                xm.save(lora_state_dict, f"{checkpoint_path}/adapter_model.bin")
 
-            #Save configuration
-            model.save_pretrained(checkpoint_path)
-            tokenizer.save_pretrained(checkpoint_path)
+                #Save configuration
+                model.save_pretrained(checkpoint_path)
+                tokenizer.save_pretrained(checkpoint_path)
+            xm.rendezvous("checkpoint_save")
 
     if is_master:
         logger.info("Training Completed")
