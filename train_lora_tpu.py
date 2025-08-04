@@ -218,14 +218,27 @@ def train_on_tpu(index, config):
         if is_master:
             checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch}"
             os.makedirs(checkpoint_path, exist_ok=True)
+
+            import copy
             
             # Save LoRA weights only
             lora_state_dict = get_lora_state_dict(model)
-            xm.save(lora_state_dict, f"{checkpoint_path}/adapter_model.bin")
+            cpu_state_dict = {k: v.cpu() for k, v in lora_state_dict.items()}
+            xm.save(cpu_state_dict, f"{checkpoint_path}/adapter_model.bin")
+            
+            cpu_model = copy.deepcopy(model)
+            cpu_model = cpu_model.cpu()
             
             # Save configuration
-            model.save_pretrained(checkpoint_path)
+            cpu_model.save_pretrained(checkpoint_path, safe_serialization=False)
             tokenizer.save_pretrained(checkpoint_path)
+
+            # Clean up
+            del cpu_model
+            del cpu_state_dict
+            
+
+            
             
             logger.info(f"Checkpoint saved to {checkpoint_path}")
 
