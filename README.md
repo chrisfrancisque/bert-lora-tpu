@@ -11,7 +11,7 @@ Low-Rank Adaptation (LoRA) implementation for BERT-base model on SST-2 sentiment
 
 ## Overview
 
-This project implements parameter-efficient fine-tuning of BERT using LoRA, training only 0.037% of model parameters while maintaining performance of ~90%. The implementation is optimized for Google Cloud TPUs using PyTorch/XLA.
+This project implements parameter-efficient fine-tuning of BERT using LoRA, training only 0.037% of model parameters while obtaining performance of ~85%. The implementation is optimized for Google Cloud TPUs using PyTorch/XLA.
 
 ### Key Features
 * LoRA implementation via Hugging Face PEFT
