@@ -87,13 +87,18 @@ def train_on_tpu(index, config):
         logger.info(f"Starting training on TPU core {index}")
         setup_directories(config)
 
-    # Load data on ALL processes not just master
-    train_dataset, eval_dataset, tokenizer = load_and_prepare_dataset(config)
+    # Load data on ALL processes
+    train_dataset, eval_dataset, _ = load_and_prepare_dataset(config)  # Ignore tokenizer from here
     
-    # Create model
-    model = create_lora_model(config)
+    # Create model from warmed baseline
+    model, tokenizer, baseline_info = create_lora_model(config, device='cpu', use_baseline=True)
     model = model.to(device)
     
+    if is_master:
+        logger.info(f"Using warmed baseline model")
+        logger.info(f"Baseline accuracy: {baseline_info.get('warm_up_accuracy', 0):.4f}")
+
+        
     # Create optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -253,19 +258,20 @@ def train_on_tpu(index, config):
             save_metrics(eval_metrics, f"{config.output_dir}/final_metrics.json")
 
             summary = {
-                'config': {
-                    'model': config.model_name,
-                    'lora_rank': config.lora_config.r,
-                    'lora_alpha': config.lora_config.lora_alpha,
-                    'learning_rate': config.learning_rate,
-                    'batch_size': config.total_train_batch_size,
-                    'epochs': config.num_train_epochs
-                },
-                'final_metrics': {k: v for k, v in eval_metrics.items() if k != 'roc_curve'},
-                'metrics_history': [{k: v for k, v in m.items() if k != 'roc_curve'} 
-                                  for m in metrics_history]
-            }
-
+            'config': {
+                'model': 'baseline_model_seed42 (warmed bert-base-uncased)',
+                'baseline_accuracy': baseline_info.get('warm_up_accuracy', 0),
+            'lora_rank': config.lora_config.r,
+            'lora_alpha': config.lora_config.lora_alpha,
+            'learning_rate': config.learning_rate,
+            'batch_size': config.total_train_batch_size,
+            'epochs': config.num_train_epochs
+                    },
+            'final_metrics': {k: v for k, v in eval_metrics.items() if k != 'roc_curve'},
+            'metrics_history': [{k: v for k, v in m.items() if k != 'roc_curve'} 
+                      for m in metrics_history]
+                    
+                    }
             with open(f"{config.output_dir}/training_summary.json", 'w') as f:
                 json.dump(summary, f, indent=2)
 
