@@ -16,7 +16,6 @@ import logging
 from datetime import datetime
 import json
 from tqdm import tqdm
-import torch._dynamo.config as dynamo_config
 import torch.nn.functional as F
 import math
 
@@ -81,24 +80,33 @@ def track_gradients(model, step, writer_dict):
 def train_on_tpu(index, config):
     # Device setup
     device = xm.xla_device()
-    is_master = index == 0
+    
+    # The index is passed as the first argument by xmp.spawn
+    is_master = index == 0  # Master is typically index 0
 
     if is_master:
-        logger.info(f"Starting training on TPU core {index}")
+        logger.info(f"Starting LoRA training on TPU core {index}")
+        logger.info(f"Training configuration:")
+        logger.info(f"  - Train samples: {config.train_samples}")
+        logger.info(f"  - Batch size per device: {config.per_device_train_batch_size}")
+        logger.info(f"  - Total batch size: {config.total_train_batch_size}")
+        logger.info(f"  - Learning rate: {config.learning_rate}")
+        logger.info(f"  - LoRA rank: {config.lora_config.r}")
+        logger.info(f"  - LoRA alpha: {config.lora_config.lora_alpha}")
         setup_directories(config)
 
     # Load data on ALL processes
-    train_dataset, eval_dataset, _ = load_and_prepare_dataset(config)  # Ignore tokenizer from here
+    train_dataset, eval_dataset, _ = load_and_prepare_dataset(config)
     
     # Create model from warmed baseline
     model, tokenizer, baseline_info = create_lora_model(config, device='cpu', use_baseline=True)
     model = model.to(device)
     
     if is_master:
-        logger.info(f"Using warmed baseline model")
+        logger.info(f"Starting from warmed baseline model")
         logger.info(f"Baseline accuracy: {baseline_info.get('warm_up_accuracy', 0):.4f}")
+        logger.info(f"Training will progress from this 48.86% baseline")
 
-        
     # Create optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -106,10 +114,13 @@ def train_on_tpu(index, config):
         weight_decay=config.weight_decay
     )
 
+    # World size is 8 for TPU v3-8
+    world_size = 8
+    
     # Create distributed sampler and dataloader
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
-        num_replicas=8,
+        num_replicas=world_size,
         rank=index,
         shuffle=True
     )
@@ -134,16 +145,18 @@ def train_on_tpu(index, config):
     if is_master:
         logger.info(f"Total training steps: {num_training_steps}")
         logger.info(f"Warmup steps: {num_warmup_steps}")
+        logger.info(f"World size: {world_size}")
 
     # Training Loop
     global_step = 0
+    best_accuracy = baseline_info.get('warm_up_accuracy', 0.4886)
 
     for epoch in range(config.num_train_epochs):
         model.train()
         epoch_loss = 0
 
         if is_master:
-            pbar = tqdm(total=len(train_dataloader), desc=f"Epoch {epoch}")
+            pbar = tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{config.num_train_epochs}")
 
         for step, batch in enumerate(train_device_loader):
             # Forward Pass with autocast for bfloat16
@@ -200,95 +213,115 @@ def train_on_tpu(index, config):
         if is_master:
             pbar.close()
             avg_loss = epoch_loss / len(train_dataloader)
-            logger.info(f"Epoch {epoch} average loss: {avg_loss:.4f}")
+            logger.info(f"Epoch {epoch+1} average loss: {avg_loss:.4f}")
 
-        # IMPORTANT: ALL processes must participate in evaluation
+        # Evaluation
         logger.info("Running evaluation")
         eval_metrics = evaluate_model(model, eval_dataset, config, device)
         xm.mark_step()
         
-        # IMPORTANT: ALL processes must reach this synchronization point
+        # Synchronization point
         xm.rendezvous(f"eval_epoch_{epoch}_complete")
 
         # Only master handles metrics logging and saving
         if is_master:
+            current_accuracy = eval_metrics['accuracy']
             metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in eval_metrics.items() 
                                    if k != 'roc_curve'])
-            logger.info(f"Epoch {epoch} eval metrics: {metrics_str}")
+            logger.info(f"Epoch {epoch+1} eval metrics: {metrics_str}")
+            
+            # Track improvement from baseline
+            improvement = current_accuracy - baseline_info.get('warm_up_accuracy', 0.4886)
+            logger.info(f"Improvement from baseline: +{improvement:.4f} ({improvement*100:.2f}%)")
+            
+            if current_accuracy > best_accuracy:
+                best_accuracy = current_accuracy
+                logger.info(f"New best accuracy: {best_accuracy:.4f}")
             
             metrics_history.append(eval_metrics)
-            save_metrics(eval_metrics, f"{config.output_dir}/metrics_epoch_{epoch}.json")
+            save_metrics(eval_metrics, f"{config.output_dir}/metrics_epoch_{epoch+1}.json")
 
-        # Save checkpoint after EVERY epoch (not just the last one)
+        # Save checkpoint
         if is_master:
-            checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch}"
+            checkpoint_path = f"{config.output_dir}/checkpoint_epoch_{epoch+1}"
             os.makedirs(checkpoint_path, exist_ok=True)
 
-            import copy
-            
             # Save LoRA weights only
             lora_state_dict = get_lora_state_dict(model)
             cpu_state_dict = {k: v.cpu() for k, v in lora_state_dict.items()}
-            xm.save(cpu_state_dict, f"{checkpoint_path}/adapter_model.bin")
+            torch.save(cpu_state_dict, f"{checkpoint_path}/adapter_model.bin")
             
-            cpu_model = copy.deepcopy(model)
-            cpu_model = cpu_model.cpu()
-            
-            # Save configuration
-            cpu_model.save_pretrained(checkpoint_path, safe_serialization=False)
+            # Save model config
+            model.save_pretrained(checkpoint_path, safe_serialization=False)
             tokenizer.save_pretrained(checkpoint_path)
-
-            # Clean up
-            del cpu_model
-            del cpu_state_dict
             
-
-            
+            # Save training info
+            checkpoint_info = {
+                'epoch': epoch + 1,
+                'accuracy': current_accuracy,
+                'baseline_accuracy': baseline_info.get('warm_up_accuracy', 0.4886),
+                'improvement': improvement,
+                'best_accuracy': best_accuracy,
+                'lora_rank': config.lora_config.r,
+                'lora_alpha': config.lora_config.lora_alpha
+            }
+            with open(f"{checkpoint_path}/checkpoint_info.json", 'w') as f:
+                json.dump(checkpoint_info, f, indent=2)
             
             logger.info(f"Checkpoint saved to {checkpoint_path}")
 
-        # IMPORTANT: ALL processes must synchronize after checkpoint save
+        # Synchronization after checkpoint
         xm.rendezvous(f"checkpoint_epoch_{epoch}_saved")
         xm.mark_step()
 
-        # Generate final visualizations and summary only on last epoch
-        if is_master and epoch == config.num_train_epochs - 1:
-            logger.info("Generating final visualizations...")
-            visualize_metrics(metrics_history, f"{config.output_dir}/plots")
-            save_metrics(eval_metrics, f"{config.output_dir}/final_metrics.json")
-
-            summary = {
-            'config': {
-                'model': 'baseline_model_seed42 (warmed bert-base-uncased)',
-                'baseline_accuracy': baseline_info.get('warm_up_accuracy', 0),
-            'lora_rank': config.lora_config.r,
-            'lora_alpha': config.lora_config.lora_alpha,
-            'learning_rate': config.learning_rate,
-            'batch_size': config.total_train_batch_size,
-            'epochs': config.num_train_epochs
-                    },
-            'final_metrics': {k: v for k, v in eval_metrics.items() if k != 'roc_curve'},
-            'metrics_history': [{k: v for k, v in m.items() if k != 'roc_curve'} 
-                      for m in metrics_history]
-                    
-                    }
-            with open(f"{config.output_dir}/training_summary.json", 'w') as f:
-                json.dump(summary, f, indent=2)
-
+    # Generate final visualizations and summary
     if is_master:
-        logger.info("Training completed successfully!")
+        logger.info("Generating final visualizations...")
+        visualize_metrics(metrics_history, f"{config.output_dir}/plots")
+        
+        final_metrics = metrics_history[-1] if metrics_history else {}
+        save_metrics(final_metrics, f"{config.output_dir}/final_metrics.json")
+
+        # Create comprehensive summary
+        summary = {
+            'training_config': {
+                'model': 'BERT-base with warmed baseline',
+                'baseline_accuracy': baseline_info.get('warm_up_accuracy', 0.4886),
+                'lora_rank': config.lora_config.r,
+                'lora_alpha': config.lora_config.lora_alpha,
+                'target_modules': config.lora_config.target_modules,
+                'learning_rate': config.learning_rate,
+                'batch_size': config.total_train_batch_size,
+                'epochs': config.num_train_epochs,
+                'train_samples': config.train_samples
+            },
+            'results': {
+                'final_accuracy': final_metrics.get('accuracy', 0),
+                'best_accuracy': best_accuracy,
+                'improvement_from_baseline': best_accuracy - baseline_info.get('warm_up_accuracy', 0.4886),
+                'final_metrics': {k: v for k, v in final_metrics.items() if k != 'roc_curve'}
+            },
+            'metrics_history': [{k: v for k, v in m.items() if k != 'roc_curve'} 
+                               for m in metrics_history]
+        }
+        
+        with open(f"{config.output_dir}/training_summary.json", 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        logger.info("=" * 50)
+        logger.info("LoRA Training Complete!")
+        logger.info(f"Baseline accuracy: {baseline_info.get('warm_up_accuracy', 0.4886):.4f}")
+        logger.info(f"Final accuracy: {final_metrics.get('accuracy', 0):.4f}")
+        logger.info(f"Best accuracy: {best_accuracy:.4f}")
+        logger.info(f"Total improvement: +{best_accuracy - baseline_info.get('warm_up_accuracy', 0.4886):.4f}")
+        logger.info("=" * 50)
 
 
 def main():
     config = TrainingConfig()
     
-    # When using xla_dist, it will handle the spawning
-    # Get the local rank from environment
-    import os
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    
-    # Run directly without xmp.spawn
-    train_on_tpu(local_rank, config)
+    # Use None for nprocs to use all available devices
+    xmp.spawn(train_on_tpu, args=(config,), nprocs=None)
 
 if __name__ == "__main__":
     main()

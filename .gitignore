@@ -24,19 +24,27 @@ __pycache__/
 ehthumbs.db
 Thumbs.db
 
-# Project specific
-outputs/
-logs/
+# Project specific - Large model files only
 *.bin
 *.safetensors
 *.pt
 *.pth
-checkpoints/
+baseline_model_seed42/vocab.txt
+baseline_model_seed42/tokenizer.json
+
+# Other large/temporary files
+outputs/
+logs/
 .ipynb_checkpoints/
+lora_outputs/gradients/
 
 # Data
 data/
+dataset_cache/
 *.csv
-*.json
-!requirements.txt
+
+# BUT allow JSON config files
+!checkpoint_info.json
 !config.json
+!baseline_info.json
+!*.json

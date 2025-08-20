@@ -1,0 +1,9 @@
+{
+  "epoch": 3,
+  "accuracy": 0.908256880733945,
+  "baseline_accuracy": 0.4886,
+  "improvement": 0.41965688073394497,
+  "best_accuracy": 0.908256880733945,
+  "lora_rank": 8,
+  "lora_alpha": 16
+}

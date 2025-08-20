@@ -1,0 +1,51 @@
+{
+  "training_config": {
+    "model": "BERT-base with warmed baseline",
+    "baseline_accuracy": 0.4886,
+    "lora_rank": 8,
+    "lora_alpha": 16,
+    "target_modules": [
+      "query",
+      "value"
+    ],
+    "learning_rate": 0.0005,
+    "batch_size": 128,
+    "epochs": 3,
+    "train_samples": 30000
+  },
+  "results": {
+    "final_accuracy": 0.908256880733945,
+    "best_accuracy": 0.908256880733945,
+    "improvement_from_baseline": 0.41965688073394497,
+    "final_metrics": {
+      "accuracy": 0.908256880733945,
+      "precision": 0.90625,
+      "recall": 0.9144144144144144,
+      "f1_score": 0.9103139013452914,
+      "roc_auc": 0.9686842216047824
+    }
+  },
+  "metrics_history": [
+    {
+      "accuracy": 0.8841743119266054,
+      "precision": 0.8960739030023095,
+      "recall": 0.8738738738738738,
+      "f1_score": 0.8848346636259977,
+      "roc_auc": 0.9551628146838427
+    },
+    {
+      "accuracy": 0.9036697247706422,
+      "precision": 0.9186046511627907,
+      "recall": 0.8896396396396397,
+      "f1_score": 0.9038901601830663,
+      "roc_auc": 0.9658268081165277
+    },
+    {
+      "accuracy": 0.908256880733945,
+      "precision": 0.90625,
+      "recall": 0.9144144144144144,
+      "f1_score": 0.9103139013452914,
+      "roc_auc": 0.9686842216047824
+    }
+  ]
+}
